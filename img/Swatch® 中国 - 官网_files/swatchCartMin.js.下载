@@ -1,0 +1,732 @@
+"use strict";
+
+function Customer(){
+    this.cookieName = "msc";
+    this.cookiePath = "/";
+    this.cookieValue = '{}';
+    this.cookieDomain = ".swatch.com";
+    this.cookieLifeTime = 0;
+    this.currentWebsite = '';
+    this.cookiePartLimit = 2;
+    this.cookieSizeLimit = 1500;
+    this.debugMode = false;
+    this.compression = false;
+    try {
+        this.event = {
+            'cart_updated': new Event('cart_updated'),
+            'customer_updated': new Event('customer_updated')
+        }
+    } catch (e) {
+        (function () {
+            if ( typeof window.CustomEvent === "function" ) return false; //If not IE
+
+            function CustomEvent ( event, params ) {
+                params = params || { bubbles: false, cancelable: false, detail: undefined };
+                var evt = document.createEvent( 'CustomEvent' );
+                evt.initCustomEvent( event, params.bubbles, params.cancelable, params.detail );
+                return evt;
+            }
+
+            CustomEvent.prototype = window.Event.prototype;
+
+            window.CustomEvent = CustomEvent;
+        })();
+
+        this.event = {
+            'cart_updated': new CustomEvent('cart_updated'),
+            'customer_updated': new CustomEvent('customer_updated')
+        }
+    }
+}
+
+Customer.prototype = {
+    priceFormat: {
+        n : 2, // number of decimals: 2 = 1000.00, 3 = 1000.000
+        d : ',', // decimal separator: ',' = 1000,00, '.' = 1000.00
+        t : '', // thousands separator: '' = 100000.00, ',' = 100,000.00
+        c : '€', // €
+        p : 1, // 0 = before (€ 1000.00), 1 = after
+        l : '' // TTC label
+    },
+
+    init: function(website) {
+        this.currentWebsite = website;
+        var options;
+        try {
+            options = this.getCookieOption();
+            if ('pf' in options) {
+                this.priceFormat = options['pf'];
+            }
+            if ('l' in options) {
+                this.cookieLifeTime = options['l'];
+            }
+            if ('p' in options) {
+                this.cookiePartLimit = options['p'];
+            }
+            if ('s' in options) {
+                this.cookieSizeLimit = options['s'];
+            }
+            if ('d' in options) {
+                this.debugMode = options['d'];
+            }
+            if ('c' in options) {
+                this.compression = options['c'];
+            }
+        } catch(e) {
+            this.log(e);
+            this.log("Fail to load options ! Use the default.");
+        }
+
+        var content;
+        try {
+            content = this.getContent();
+            var updateContent = false;
+            if (!content || content.length < 2) {
+                content = {};
+            }
+        } catch (e) {
+            content = {};
+            this.log(e);
+        }
+
+        if (!(this.currentWebsite in content)) {
+            content[website] = {};
+            updateContent = true;
+        }
+        if (!('c' in content) || !('l' in content['c'])) {
+            content['c'] = {'l':false};
+            updateContent = true;
+        }
+        if (updateContent) {
+            this.setContent(content);
+        }
+    },
+
+    getCookieOption: function() {
+        var cookies = document.cookie;
+        var ca = cookies.split(';');
+        var cookieValue = '';
+        var cookieName = this.cookieName+'o';
+        for(var i = 0; i <ca.length; i++) {
+            var c = ca[i];
+            while (c.charAt(0) === ' ') {
+                c = c.substring(1);
+            }
+            if (c.indexOf(cookieName) === 0) {
+                cookieValue += c.substring(cookieName.length + 1, c.length);
+            }
+        }
+        var option = {};
+        try {
+            option = JSON.parse(decodeURIComponent(decodeURIComponent(cookieValue)));
+        } catch (e) {
+            this.log('Fail to load option. Using default instead.');
+            option = {
+                "pf": this.priceFormat,
+                "c" : this.compression,
+                "s" : this.cookieSizeLimit,
+                "l" : this.cookieLifeTime,
+                "p" : this.cookiePartLimit,
+                "d" : this.debugMode
+            };
+        }
+        return option;
+    },
+
+    lzwEncode: function(s) {
+        var dict = {};
+        var data = (s + "").split("");
+        var out = [];
+        var currChar;
+        var phrase = data[0];
+        var code = 256;
+        for (var i=1; i<data.length; i++) {
+            currChar=data[i];
+            if (dict[phrase + currChar] != null) {
+                phrase += currChar;
+            }
+            else {
+                out.push(phrase.length > 1 ? dict[phrase] : phrase.charCodeAt(0));
+                dict[phrase + currChar] = code;
+                code++;
+                phrase=currChar;
+            }
+        }
+        out.push(phrase.length > 1 ? dict[phrase] : phrase.charCodeAt(0));
+        for (var j=0; j<out.length; j++) {
+            out[j] = String.fromCharCode(out[j]);
+        }
+        return out.join("");
+    },
+
+    lzwDecode: function(s) {
+        var dict = {};
+        var data = (s + "").split("");
+        var currChar = data[0];
+        var oldPhrase = currChar;
+        var out = [currChar];
+        var code = 256;
+        var phrase;
+        for (var i=1; i<data.length; i++) {
+            var currCode = data[i].charCodeAt(0);
+            if (currCode < 256) {
+                phrase = data[i];
+            }
+            else {
+                phrase = dict[currCode] ? dict[currCode] : (oldPhrase + currChar);
+            }
+            out.push(phrase);
+            currChar = phrase.charAt(0);
+            dict[code] = oldPhrase + currChar;
+            code++;
+            oldPhrase = phrase;
+        }
+        return out.join("");
+    },
+
+    log: function(message) {
+        if (this.debugMode) {
+            console.log(message);
+        }
+    },
+
+    isLoggedIn: function() {
+        var content = this.getContent();
+        var isLoggedIn = false;
+        if (('c' in content) && 'l' in content['c']) {
+            isLoggedIn = content['c']['l'];
+        }
+        return isLoggedIn;
+    },
+
+    disableCompression: function() {
+        var option = this.getCookieOption();
+        if (this.compression) {
+            this.compression = false;
+            this.cookieSizeLimit *= 2;
+            option['c'] = this.compression;
+            option['s'] = this.cookieSizeLimit;
+        }
+        this.saveOption(option);
+    },
+
+    hasWishlist: function() {
+        var content = this.getContent();
+        var hasWishlist = false;
+        if (('c' in content) && content['c'].hasOwnProperty('w')) {
+            hasWishlist = content['c']['w'];
+        }
+        return hasWishlist;
+    },
+
+    getCustomerName: function() {
+        var name = '';
+        if (this.isLoggedIn()) {
+            var content = this.getContent();
+            name = content['c']['n'];
+        }
+        return name;
+    },
+
+    updateCookie: function() {
+        if (this.cookieValue.length > this.cookiePartLimit * this.cookieSizeLimit * 0.95) {
+            this.log('Cookie size limit reached !');
+            this.log('Last operation canceled.');
+            return;
+        }
+
+        for (var j = 1; j <= this.cookiePartLimit; j++) {
+            var cookieValue = this.cookieValue.substring((j-1) * this.cookieSizeLimit, j * this.cookieSizeLimit);
+            this.setCookieValue(this.cookieName + j, cookieValue);
+        }
+
+        if (this.compression && this.cookieValue !== this.getCookieRawValue()) {
+            for (j = 1; j <= this.cookiePartLimit; j++) {
+                this.setCookieValue(this.cookieName + j, '');
+            }
+            this.log('Unsupported cookie compression !');
+            this.disableCompression();
+            this.log('Compression disabled !');
+            this.cookieValue = this.lzwDecode(this.cookieValue);
+            this.updateCookie();
+        }
+    },
+
+    setCookieValue: function(cookieName, cookieValue) {
+        var cookieString = cookieName + '=' + cookieValue + ';';
+        var expires = 'session';
+
+        if (this.cookieLifeTime > 0) {
+            expires = (cookieValue.length > 0) ? new Date(new Date().getTime() + (this.cookieLifeTime * 1000)) : "Thu, 01 Jan 1970 00:00:01 GMT";
+            cookieString += 'expires=' + expires + ";";
+            // Delete on iOS
+            if (!(cookieValue.length > 0)) {
+                document.cookie = cookieString;
+            }
+        }
+
+        this.log('Cookie '+cookieName+' size : ' + cookieValue.length + ' octets');
+        this.log('Expires : '+expires);
+        cookieString += 'path=' + this.cookiePath + ';domain=' + this.cookieDomain;
+        document.cookie = cookieString;
+    },
+
+    getCookieRawValue: function() {
+        var cookies = document.cookie;
+        var ca = cookies.split(';');
+        var cookieValue = '';
+        var more = true;
+        var j = 0;
+        var cookieName = this.cookieName;
+        while (more && j < this.cookiePartLimit) {
+            j++;
+            more = false;
+            cookieName = this.cookieName+j;
+            for(var i = 0; i <ca.length; i++) {
+                var c = ca[i];
+                while (c.charAt(0) === ' ') {
+                    c = c.substring(1);
+                }
+                if (c.indexOf(cookieName) === 0) {
+                    cookieValue += c.substring(cookieName.length + 1, c.length);
+                    more = true;
+                }
+            }
+        }
+        return cookieValue;
+    },
+
+    cleanCookie: function() {
+        this.log('Erase corrupted cookies');
+        var cookieName = this.cookieName;
+        var expires = 'expires=Thu, 01 Jan 1970 00:00:01 GMT;';
+        var cookieString = '';
+        var cleanOnAllDomain = function(cookieString, additionalDomain) {
+            document.cookie = cookieString + 'domain=swatch.com;';
+            document.cookie = cookieString + 'domain=.swatch.com;';
+            document.cookie = cookieString + 'domain=shop.swatch.com;';
+            document.cookie = cookieString + 'domain=.shop.swatch.com;';
+            document.cookie = cookieString + 'domain='+additionalDomain+';';
+        };
+        for (var i=1; i <= this.cookiePartLimit; i++) {
+            cookieName = this.cookieName + i;
+            cookieString = cookieName + '=;' + expires;
+
+            document.cookie = cookieString;
+
+            cleanOnAllDomain(cookieString, this.cookieDomain);
+
+            cookieString = cookieString + 'path='+this.cookiePath + ';';
+            cleanOnAllDomain(cookieString, this.cookieDomain);
+        }
+    },
+
+    getContent: function() {
+        var content = {};
+        try {
+            var cookieValue = this.getCookieRawValue();
+            if (cookieValue) {
+                try {
+                    var rawValue = (this.compression) ? this.lzwDecode(cookieValue) : cookieValue;
+                    var decoded = decodeURIComponent(decodeURIComponent(rawValue));
+                    content = JSON.parse(decoded);
+                } catch (e) {
+                    rawValue = (this.compression) ? cookieValue : this.lzwDecode(cookieValue);
+                    decoded = decodeURIComponent(decodeURIComponent(rawValue));
+                    content = JSON.parse(decoded);
+                }
+            }
+        } catch (e) {
+            this.log(e);
+            this.log('Erase cookie content !');
+            content = {};
+            this.cleanCookie();
+        }
+        return content;
+    },
+
+    setContent: function(content) {
+        var stringified = JSON.stringify(content);
+        var cleaned = stringified.replace(/(&|%26)nbsp(;|%3B)/g, ' ');
+        var encoded = encodeURIComponent(cleaned);
+        if (this.compression) {
+            this.cookieValue = this.lzwEncode(encoded);
+        } else {
+            this.cookieValue = encoded;
+        }
+        this.updateCookie();
+    },
+
+    getCart: function() {
+        var content = this.getContent();
+        var cart = {};
+        if (this.currentWebsite in content) {
+            cart = content[this.currentWebsite];
+        }
+        return cart;
+    },
+
+    setCart: function(cart, preventEvent) {
+        var content = this.getContent();
+        content[this.currentWebsite] = cart;
+        this.setContent(content);
+        if (!preventEvent) {
+            document.dispatchEvent(this.event['cart_updated']);
+        }
+    },
+
+    getNumberOfProduct: function() {
+        var cart = this.getCart();
+        var number = 0;
+        for(var product in cart) {
+            if ('q' in cart[product]) {
+                number += parseInt(cart[product]['q']);
+            }
+        }
+        return number;
+    },
+
+    getProductFromCart: function(hash) {
+        var cart = this.getCart();
+        var product = false;
+        if (hash in cart) {
+            product = cart[hash];
+        } else {
+            this.log("Product isn't in cart.");
+        }
+        return product;
+    },
+
+    setProductInCart: function(product) {
+        var cart = this.getCart();
+        if (product) {
+            if (!('h' in product)) {
+                this.log('Cannot add product to cart');
+            }
+            cart[product['h']] = product;
+            this.setCart(cart);
+        } else {
+            this.log('Cannot add product to cart');
+        }
+        this.updateCartTotal();
+        return product;
+    },
+
+    updateQuantity: function(hash, qtyDelta) {
+        var product = this.getProductFromCart(hash);
+        if (product && ('q' in product)) {
+            product['q'] += parseInt(qtyDelta);
+            if (product['q'] > 0) {
+                this.setProductInCart(product);
+                if (product['a'].hasOwnProperty('l') &&
+                    product['a']['l'].hasOwnProperty('p') &&
+                    product['a']['l'].hasOwnProperty('o')) {
+                    var optionIds = product['a']['l']['o'].split('_');
+                    this.updateParentOption(product['a']['l']['p'], optionIds[0], optionIds[1], product['q']);
+                }
+                this.checkPromoBooks(product);
+            } else {
+                this.removeFromCart(product['h']);
+            }
+        } else {
+            this.log("Product isn't in cart.");
+        }
+        return product;
+    },
+
+    removeFromCart: function(hash, checkMysteryPromo) {
+        checkMysteryPromo = checkMysteryPromo | true;
+        var cart = this.getCart();
+        if (hash in cart) {
+            var deletedProduct = cart[hash];
+            delete cart[hash];
+            this.setCart(cart);
+            try {
+                if (deletedProduct['a'].hasOwnProperty('l') &&
+                    deletedProduct['a']['l'].hasOwnProperty('p') &&
+                    deletedProduct['a']['l'].hasOwnProperty('o')) {
+                    var optionIds = deletedProduct['a']['l']['o'].split('_');
+                    this.updateParentOption(deletedProduct['a']['l']['p'], optionIds[0], optionIds[1], 0);
+                }
+                this.removePromoBooks(deletedProduct);
+                this.removeEngravingLoop(deletedProduct);
+            } catch (e) {
+                this.log(e);
+            }
+        }
+        this.removeUnlinkedChildProduct();
+        if (checkMysteryPromo) {
+            this.checkMysteryPromoToRemove();
+        }
+        this.updateCartTotal();
+    },
+
+    getCurrentWarranty: function() {
+        var cart = this.getCart();
+        if (!('c' in cart)) {
+            return this.warranties['o'];
+        } else {
+            return {
+                'title': cart['c']['n'],
+                'description': cart['c']['w'],
+                'price': cart['c']['f']
+            };
+        }
+    },
+
+    getCurrentTotal: function() {
+        var cart = this.getCart();
+        if (!('c' in cart)) {
+            return 0;
+        } else {
+            return parseFloat(cart['c']['t']);
+        }
+    },
+
+    updateCartTotal: function(preventEvent) {
+        var cart = this.getCart();
+        if (!('c' in cart)) {
+            cart['c'] = {};
+        }
+        var total = 0;
+        for (var product in cart) {
+            if ('p' in cart[product] && 'q' in cart[product]) {
+                total += this.convertToPriceAmount(cart[product]['p']) * parseInt(cart[product]['q']);
+            }
+        }
+        cart['c']['t'] = total;
+        cart['c']['ft'] = this.formatPrice(total);
+        this.setCart(cart, preventEvent);
+    },
+
+    formatPrice: function (price) {
+        var decimals = this.priceFormat.n,
+            decPoint = this.priceFormat.d,
+            thousandsSep = this.priceFormat.t,
+            currSymbol = this.priceFormat.c,
+            currSymbolPosition = this.priceFormat.p;
+
+        var parsedPrice = parseFloat(price);
+        var cart = this.getCart();
+        if (cart.hasOwnProperty('c') && cart['c'].hasOwnProperty('ot') && cart['c'].hasOwnProperty('nt')) {
+            parsedPrice = (parsedPrice / (1 + parseFloat(cart['c']['ot'])/100)) * (1 + parseFloat(cart['c']['nt'])/100);
+        }
+        var n = !isFinite(+parsedPrice) ? 0 : +parsedPrice,
+            prec = !isFinite(+decimals) ? 0 : Math.abs(decimals),
+            toFixedFix = function (n, prec) {
+                // Fix for IE parseFloat(0.55).toFixed(0) = 0;
+                var k = Math.pow(10, prec);
+                return Math.floor(parseFloat((n * k).toFixed(decimals))) / k;
+            },
+            s = (prec ? toFixedFix(n, prec) : Math.floor(n)).toString().split('.');
+        if (s[0].length > 3) {
+            s[0] = s[0].replace(/\B(?=(?:\d{3})+(?!\d))/g, thousandsSep);
+        }
+        if ((s[1] || '').length < prec) {
+            s[1] = s[1] || '';
+            s[1] += new Array(prec - s[1].length + 1).join('0');
+        }
+
+        var formattedPrice = s.join(decPoint);
+
+        if (currSymbol) {
+            formattedPrice = currSymbolPosition === "1" ? formattedPrice + currSymbol : currSymbol + formattedPrice;
+        }
+
+        return formattedPrice;
+    },
+
+    convertToPriceAmount: function(price) {
+        if (price) {
+            var regex = /(\d*[.,']?\d*([.,']\d{0,2})?)/;
+            var result = regex.exec(price);
+            if (result && result.length > 0) {
+                var priceText = result[0];
+                if (priceText.search('[,]') > 0 && priceText.search('[.]') > 0) {
+                    priceText = priceText.replace(',','');
+                }
+                priceText = priceText.replace(' ','');
+                priceText = priceText.replace('\'', '');
+                return parseFloat(priceText);
+            }
+        }
+        return 0;
+    },
+
+    checkMysteryPromoToRemove: function() {
+        var cart = this.getCart();
+        var obj = this;
+        var mysteryPromoInCart = [];
+        var productTypeInCart = {};
+
+        jQuery.each(cart, function(hash, item) {
+            if (hash.length <= 1) {
+                return true;
+            } else if (item.hasOwnProperty('a') && item['a'].hasOwnProperty('m') && item['a']['m'] !== false) {
+                mysteryPromoInCart.push(item['a']['m']);
+            } else if (item.hasOwnProperty('a') && item['a'].hasOwnProperty('f')) {
+                productTypeInCart[item['a']['f']] = true;
+            }
+        });
+
+        jQuery.each(mysteryPromoInCart, function(index, mysteryPromoType) {
+            if ((mysteryPromoType === 'Swa' && !productTypeInCart.hasOwnProperty('0'))
+                || (mysteryPromoType === 'FF' && !productTypeInCart.hasOwnProperty('1'))
+            ) {
+                obj.removeMysteryPromo(mysteryPromoType);
+            }
+        });
+    },
+
+    removeMysteryPromo: function(mysteryPromoType) {
+        var cart = this.getCart();
+        for (var hash in cart) {
+            if (hash.length <= 1) {
+                continue;
+            }
+            if (cart[hash].hasOwnProperty('a') && cart[hash]['a'].hasOwnProperty('m') && cart[hash]['a']['m'] === mysteryPromoType) {
+                this.removeFromCart(hash, false);
+            }
+        }
+    },
+
+    removePromoBooks: function(product) {
+        var self = this;
+
+        // If is parent product
+        if (product.hasOwnProperty('a') && product['a'].hasOwnProperty('bk')) {
+            var booksHashList = product['a']['bk'];
+            jQuery.each(booksHashList, function(index, bookHash) {
+                self.removeFromCart(bookHash);
+            });
+        }
+
+        // If is book product
+        if (product.hasOwnProperty('o')) {
+            jQuery.each(product['o'], function(index, value) {
+                jQuery.each(value, function(optionIndex, optionValue) {
+                    if (optionIndex === 'l' && optionValue === 'book_parent_hash' && product['o'][index].hasOwnProperty('v')) {
+                        var parentItemHash = product['o'][index]['v'];
+                        var parentItem = self.getProductFromCart(parentItemHash);
+                        if (parentItem.hasOwnProperty('a') && parentItem['a'].hasOwnProperty('bk')) {
+                            var parentItemBooksHashList = parentItem['a']['bk'];
+                            parentItemBooksHashList = jQuery.grep(parentItemBooksHashList, function(value) {
+                                return value != product['h'];
+                            });
+                            parentItem['a']['bk'] = parentItemBooksHashList;
+                            self.setProductInCart(parentItem);
+                        }
+                    }
+                });
+            });
+        }
+    },
+
+    checkPromoBooks: function(product) {
+        var self = this;
+        if (product.hasOwnProperty('a') && product['a'].hasOwnProperty('bk') && product.hasOwnProperty('q')) {
+            var booksHashList = product['a']['bk'];
+            var booksQty = 0;
+
+            jQuery.each(booksHashList, function(index, bookHash) {
+                var bookItem = self.getProductFromCart(bookHash);
+                booksQty += bookItem['q']
+            });
+
+            if (booksQty > product['q']) {
+                var lastBookItemHash = booksHashList.pop();
+                var lastBookItem = this.getProductFromCart(lastBookItemHash);
+                if (lastBookItem['q'] > 1) {
+                    this.updateQuantity(lastBookItem['h'], -1);
+                } else {
+                    this.removeFromCart(lastBookItemHash);
+                }
+            }
+        }
+    },
+
+    removeEngravingLoop: function(product) {
+        let self = this;
+
+        // If is parent product
+        if (product.hasOwnProperty('a') && product['a'].hasOwnProperty('lp')) {
+            let loopsHashList = product['a']['lp'];
+            jQuery.each(loopsHashList, function(index, loopHash) {
+                self.removeFromCart(loopHash);
+            });
+        }
+
+        // If is loop product
+        if (product.hasOwnProperty('o')) {
+            jQuery.each(product['o'], function(index, value) {
+                jQuery.each(value, function(optionIndex, optionValue) {
+                    if (optionIndex === 'l' && optionValue === 'loop_parent_hash' && product['o'][index].hasOwnProperty('v')) {
+                        let parentItemHash = product['o'][index]['v'];
+                        let parentItem = self.getProductFromCart(parentItemHash);
+                        if (parentItem.hasOwnProperty('a') && parentItem['a'].hasOwnProperty('lp')) {
+                            let parentItemLoopsHashList = parentItem['a']['lp'];
+                            parentItemLoopsHashList = jQuery.grep(parentItemLoopsHashList, function(value) {
+                                return value !== product['h'];
+                            });
+                            parentItem['a']['lp'] = parentItemLoopsHashList;
+                            self.setProductInCart(parentItem);
+                        }
+                    }
+                });
+            });
+        }
+    },
+
+    checkEngravingLoop: function(product) {
+        var self = this;
+        if (product.hasOwnProperty('a') && product['a'].hasOwnProperty('lp') && product.hasOwnProperty('q')) {
+            var loopsHashList = product['a']['lp'];
+            var loopsQty = 0;
+
+            jQuery.each(loopsHashList, function(index, loopHash) {
+                var loopItem = self.getProductFromCart(loopHash);
+                loopsQty += loopItem['q']
+            });
+
+            if (loopsQty > product['q']) {
+                var lastLoopItemHash = loopsHashList.pop();
+                var lastLoopItem = this.getProductFromCart(lastLoopItemHash);
+                if (lastLoopItem['q'] > 1) {
+                    this.updateQuantity(lastLoopItemHash, -1);
+                } else {
+                    this.removeFromCart(lastLoopItemHash);
+                }
+            }
+        }
+    },
+
+    removeUnlinkedChildProduct: function() {
+        var cart = this.getCart();
+        for (var hash in cart) {
+            if (hash.length <= 1) {
+                continue;
+            }
+            if (cart[hash].hasOwnProperty('a') && cart[hash]['a'].hasOwnProperty('l')) {
+                var parentHash = cart[hash]['a']['l']['p'];
+                var parentProduct = this.getProductFromCart(parentHash);
+                if (!parentProduct || cart[hash]['a']['l']['o'].length < 1) {
+                    this.removeFromCart(hash);
+                }
+            }
+        }
+    },
+
+    updateParentOption: function(parentHash, optionId, optionValue, qty) {
+        var cart = this.getCart();
+        if (parentHash in cart) {
+            if (optionId in cart[parentHash]['o']) {
+                if ('q' in cart[parentHash]['o'][optionId]) {
+                    cart[parentHash]['o'][optionId]['q'][optionValue] = qty ? qty : 0;
+                } else {
+                    delete cart[parentHash]['o'][optionId];
+                }
+                this.setCart(cart);
+            }
+        }
+    }
+};
