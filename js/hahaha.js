@@ -118,7 +118,3 @@ $(".t4").mouseenter(function(){
 	clearInterval(myTimer);
 	//$(this).show();	
 });
-
-$(".t4").mouseleave(function(){
-	$(this).hide();	
-})
